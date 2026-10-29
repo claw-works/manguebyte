@@ -81,7 +81,7 @@
 //! | `fileg_*`, `fileg_depth`, `pitcheg_*`, `pitcheg_depth` | Filter and pitch envelopes, with the stages of `ampeg_*`; depth in cents. |
 //! | `amplfo_*`, `pitchlfo_*`, `fillfo_*` (`freq`, `depth`, `delay`, `fade`) | SFZ 1 sine LFOs on gain (dB), pitch and cutoff (cents). |
 //! | `lfoN_freq`, `lfoN_wave`, `lfoN_delay`, `lfoN_fade`, `lfoN_phase`, `lfoN_pitch`, `lfoN_volume`, `lfoN_amplitude`, `lfoN_pan`, `lfoN_cutoff` | SFZ 2 LFOs 1 to 4, each moving any of these. Waves: 0 triangle, 1 sine, 2 pulse 75 %, 3 square, 4 pulse 25 %, 5 pulse 12.5 %, 6 saw up, 7 saw down. LFOs and envelopes are worked out every 16 samples of the note. |
-//! | `region_label`, `group_label` and other `*_label` | Names for people; accepted and ignored. |
+//! | `region_label`, `group_label`, `sw_label` and other `*_label` | Names for people: no warning, kept in [`Region::unknown`] for tools that show them. |
 //!
 //! Every other opcode is kept in [`Region::unknown`] and reported as a
 //! [`Warning`]; values outside an opcode's range are clamped with a

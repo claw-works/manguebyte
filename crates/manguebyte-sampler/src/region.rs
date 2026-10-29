@@ -611,8 +611,9 @@ impl Region {
                     unknown(opcode, warnings, &mut self.unknown);
                 }
             }
-            // Names and labels for people and editors; nothing to play.
-            name if name.ends_with("_label") || name == "label" => {}
+            // Names and labels for people and editors: nothing to play, so no
+            // warning, but kept in `unknown` for tools that show them.
+            name if name.ends_with("_label") || name == "label" => self.unknown.push(opcode.clone()),
             _ => {
                 warnings.push(Warning {
                     location: opcode.location.clone(),
