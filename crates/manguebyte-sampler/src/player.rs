@@ -6,7 +6,147 @@ use manguebyte_dsp::event::NoteRef;
 use crate::envelope::Envelope;
 use crate::instrument::{Instrument, SampleData, Zone};
 use crate::interpolate::{Interpolation, MAX_TAPS, cubic_weights};
-use crate::region::OffMode;
+use crate::region::{FilterKind, OffMode};
+
+/// Samples between updates of what moves while a note plays (LFOs, pitch and
+/// filter envelopes): counted per voice from its start, so the output does
+/// not depend on how the audio is cut into blocks.
+const CONTROL_SAMPLES: u32 = 16;
+
+/// A number in `0..1` from `seed`, the same every time (SplitMix64).
+fn unit(seed: u64) -> f64 {
+    let mut z = seed.wrapping_add(0x9E37_79B9_7F4A_7C15);
+    z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+    ((z ^ (z >> 31)) >> 11) as f64 / (1u64 << 53) as f64
+}
+
+/// The waveform of an SFZ 2 LFO at `phase` (0 to 1), -1 to 1.
+fn lfo_wave(wave: u8, phase: f64) -> f64 {
+    let p = phase - phase.floor();
+    match wave {
+        1 => (core::f64::consts::TAU * p).sin(),
+        2 => {
+            if p < 0.75 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        3 => {
+            if p < 0.5 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        4 => {
+            if p < 0.25 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        5 => {
+            if p < 0.125 {
+                1.0
+            } else {
+                -1.0
+            }
+        }
+        6 => 2.0 * p - 1.0,
+        7 => 1.0 - 2.0 * p,
+        _ => {
+            if p < 0.25 {
+                4.0 * p
+            } else if p < 0.75 {
+                2.0 - 4.0 * p
+            } else {
+                4.0 * p - 4.0
+            }
+        }
+    }
+}
+
+/// A voice's filter: one-pole stages, or two-pole state-variable stages
+/// (topology-preserving, so the cutoff can move while it plays), one state
+/// per channel.
+#[derive(Debug, Clone, Copy)]
+struct Filter {
+    on: bool,
+    kind: FilterKind,
+    /// `tan(pi * cutoff / rate)`.
+    g: f64,
+    /// Damping of the last two-pole stage (1 / Q); earlier stages are
+    /// Butterworth.
+    k: f64,
+    /// `[stage * 2 + channel] = (state 1, state 2)`.
+    state: [(f64, f64); 6],
+}
+
+impl Filter {
+    const OFF: Self = Self {
+        on: false,
+        kind: FilterKind::Lowpass2,
+        g: 0.0,
+        k: 1.0,
+        state: [(0.0, 0.0); 6],
+    };
+
+    fn stages(&self) -> usize {
+        match self.kind {
+            FilterKind::Lowpass4 | FilterKind::Highpass4 => 2,
+            FilterKind::Lowpass6 | FilterKind::Highpass6 => 3,
+            _ => 1,
+        }
+    }
+
+    fn set(&mut self, cutoff: f64, sample_rate: f64) {
+        let fc = cutoff.clamp(10.0, 0.45 * sample_rate);
+        self.g = (core::f64::consts::PI * fc / sample_rate).tan();
+    }
+
+    fn process(&mut self, channel: usize, x: f64) -> f64 {
+        let g = self.g;
+        let mut y = x;
+        let stages = self.stages();
+        for stage in 0..stages {
+            let s = &mut self.state[stage * 2 + channel];
+            if matches!(self.kind, FilterKind::Lowpass1 | FilterKind::Highpass1) {
+                let v = (y - s.0) * g / (1.0 + g);
+                let low = v + s.0;
+                s.0 = low + v;
+                y = if self.kind == FilterKind::Lowpass1 {
+                    low
+                } else {
+                    y - low
+                };
+                continue;
+            }
+            let k = if stage + 1 == stages {
+                self.k
+            } else {
+                core::f64::consts::SQRT_2
+            };
+            let a1 = 1.0 / (1.0 + g * (g + k));
+            let (a2, a3) = (g * a1, g * g * a1);
+            let v3 = y - s.1;
+            let v1 = a1 * s.0 + a2 * v3;
+            let v2 = s.1 + a2 * s.0 + a3 * v3;
+            s.0 = 2.0 * v1 - s.0;
+            s.1 = 2.0 * v2 - s.1;
+            y = match self.kind {
+                FilterKind::Highpass2 | FilterKind::Highpass4 | FilterKind::Highpass6 => {
+                    y - k * v1 - v2
+                }
+                FilterKind::Bandpass2 => k * v1,
+                FilterKind::Bandreject2 => y - k * v1,
+                _ => v2,
+            };
+        }
+        y
+    }
+}
 
 /// Seconds of the fade a voice gets when it is cut short: by a choke group
 /// in `off_mode=fast`, by a polyphony limit or by voice stealing. The SFZ
@@ -116,6 +256,21 @@ pub(crate) struct Player {
     expression_cents: f64,
     rate_ratio: f64,
     stereo: bool,
+    sample_rate: f64,
+    /// Note velocity, 0 to 1.
+    velocity: f64,
+    fileg: Envelope,
+    pitcheg: Envelope,
+    /// Samples since the note started, for the LFOs.
+    mod_frames: u64,
+    /// Samples to the next modulation update.
+    control: u32,
+    mod_cents: f64,
+    mod_gain: f64,
+    mod_pan: f64,
+    /// The filter's cutoff before envelopes and LFOs, in hertz.
+    cutoff: f64,
+    filter: Filter,
 }
 
 impl Player {
@@ -151,6 +306,17 @@ impl Player {
         expression_cents: 0.0,
         rate_ratio: 1.0,
         stereo: false,
+        sample_rate: 48_000.0,
+        velocity: 0.0,
+        fileg: Envelope::IDLE,
+        pitcheg: Envelope::IDLE,
+        mod_frames: 0,
+        control: 0,
+        mod_cents: 0.0,
+        mod_gain: 1.0,
+        mod_pan: 0.0,
+        cutoff: 0.0,
+        filter: Filter::OFF,
     };
 
     /// Starts playing a region. Returns `false`, leaving the player idle,
@@ -165,10 +331,10 @@ impl Player {
         };
         let velocity = f64::from(start.velocity.clamp(1, 127)) / 127.0;
         let curve = velocity * velocity;
-        let velocity_gain = if zone.veltrack >= 0.0 {
-            1.0 - zone.veltrack + zone.veltrack * curve
-        } else {
-            1.0 + zone.veltrack * curve
+        let velocity_gain = match &zone.velcurve {
+            Some(table) => f64::from(table[usize::from(start.velocity.clamp(1, 127))]),
+            None if zone.veltrack >= 0.0 => 1.0 - zone.veltrack + zone.veltrack * curve,
+            None => 1.0 + zone.veltrack * curve,
         };
         self.active = true;
         self.zone = start.zone;
@@ -193,11 +359,87 @@ impl Player {
         self.bend_cents = start.bend.cents(zone);
         self.rate_ratio = sample.rate / start.sample_rate.max(1.0);
         self.stereo = sample.right.is_some();
-        self.position = zone.offset << 32;
+        self.sample_rate = start.sample_rate.max(1.0);
+        self.velocity = velocity;
+        // Draws per note, the same for the same note event and region.
+        let draw = |salt: u64| {
+            unit(
+                start.serial.wrapping_mul(0x2545_F491_4F6C_DD1D)
+                    ^ (start.zone as u64).wrapping_mul(0x9E37_79B9)
+                    ^ salt,
+            )
+        };
+        let extra = if zone.offset_random > 0 {
+            (draw(1) * (zone.offset_random + 1) as f64) as u64
+        } else {
+            0
+        };
+        self.position = (zone.offset + extra).min(zone.end) << 32;
+        if zone.modulated {
+            self.fileg = Envelope::new(&zone.fileg, velocity, self.sample_rate);
+            self.pitcheg = Envelope::new(&zone.pitcheg, velocity, self.sample_rate);
+            if let Some(cutoff) = zone.filter.cutoff {
+                let f = &zone.filter;
+                let cents = f.keytrack * (f64::from(start.key) - f64::from(f.keycenter))
+                    + f.veltrack * velocity
+                    + f.random * draw(2);
+                self.cutoff = cutoff * 2f64.powf(cents / 1_200.0);
+                // `resonance` is the boost at the cutoff, in decibels; at 0 the
+                // filter is Butterworth (Q of 1/√2, no peak).
+                let q = 10f64
+                    .powf(f.resonance / 20.0)
+                    .max(core::f64::consts::FRAC_1_SQRT_2);
+                self.filter = Filter {
+                    on: true,
+                    kind: f.kind,
+                    k: 1.0 / q,
+                    ..Filter::OFF
+                };
+            }
+            self.modulate(zone);
+        }
         self.wrap(zone);
         self.update_pitch();
         self.update_gain();
         true
+    }
+
+    /// Works out the LFOs and the pitch and filter envelopes for now.
+    fn modulate(&mut self, zone: &Zone) {
+        let t = self.mod_frames as f64 / self.sample_rate;
+        let mut cents = self.pitcheg.level() * zone.pitcheg_depth;
+        let mut cutoff_cents = self.fileg.level() * zone.fileg_depth;
+        let (mut db, mut amp, mut pan) = (0.0, 0.0, 0.0);
+        for (slot, l) in zone.lfos.iter().enumerate() {
+            if l.freq <= 0.0 || t < l.delay {
+                continue;
+            }
+            let fade = if l.fade > 0.0 {
+                ((t - l.delay) / l.fade).min(1.0)
+            } else {
+                1.0
+            };
+            // SFZ 1 LFOs (slots 0–2) are sines.
+            let v = fade
+                * lfo_wave(
+                    if slot < 3 { 1 } else { l.wave },
+                    l.phase + l.freq * (t - l.delay),
+                );
+            cents += v * l.pitch;
+            cutoff_cents += v * l.cutoff;
+            db += v * l.volume;
+            amp += v * l.amplitude;
+            pan += v * l.pan;
+        }
+        self.mod_cents = cents;
+        self.mod_gain = 10f64.powf(db / 20.0) * (1.0 + amp / 100.0).max(0.0);
+        self.mod_pan = pan / 100.0;
+        if self.filter.on {
+            self.filter.set(
+                self.cutoff * 2f64.powf(cutoff_cents / 1_200.0),
+                self.sample_rate,
+            );
+        }
     }
 
     /// The key came up (and the pedal, if it was down).
@@ -210,6 +452,8 @@ impl Player {
             return;
         }
         self.envelope.release();
+        self.fileg.release();
+        self.pitcheg.release();
         self.end_sustain(zone);
     }
 
@@ -257,6 +501,8 @@ impl Player {
             OffMode::Normal => {
                 self.hold = Hold::Released;
                 self.envelope.release();
+                self.fileg.release();
+                self.pitcheg.release();
                 self.end_sustain(zone);
             }
         }
@@ -329,7 +575,7 @@ impl Player {
     }
 
     fn update_pitch(&mut self) {
-        let cents = self.base_cents + self.bend_cents + self.expression_cents;
+        let cents = self.base_cents + self.bend_cents + self.expression_cents + self.mod_cents;
         let ratio = (2f64.powf(cents / 1_200.0) * self.rate_ratio).clamp(1.0 / 65_536.0, 256.0);
         let ratio = if ratio.is_finite() { ratio } else { 1.0 };
         self.step = (ratio * ONE as f64).round() as u64;
@@ -337,8 +583,8 @@ impl Player {
     }
 
     fn update_gain(&mut self) {
-        let gain = self.base_gain * self.expression_volume;
-        let pan = (self.pan + self.expression_pan).clamp(-1.0, 1.0);
+        let gain = self.base_gain * self.expression_volume * self.mod_gain;
+        let pan = (self.pan + self.expression_pan + self.mod_pan).clamp(-1.0, 1.0);
         if self.stereo {
             // A stereo sample is balanced: one side is turned down.
             self.gain_left = gain * (1.0 - pan).min(1.0);
@@ -447,6 +693,18 @@ impl Player {
                 self.stop();
                 return;
             }
+            if zone.modulated {
+                self.fileg.next();
+                self.pitcheg.next();
+                if self.control == 0 {
+                    self.modulate(zone);
+                    self.update_pitch();
+                    self.update_gain();
+                    self.control = CONTROL_SAMPLES;
+                }
+                self.control -= 1;
+                self.mod_frames += 1;
+            }
             let mut gain = level;
             if self.dying {
                 if self.fade_left == 0 {
@@ -482,7 +740,15 @@ impl Player {
                 self.try_leave_loop(zone, sample, first, count);
             }
             self.just_wrapped = false;
-            let (left, right) = self.gather(zone, sample, first, &weights[..count]);
+            let (mut left, mut right) = self.gather(zone, sample, first, &weights[..count]);
+            if self.filter.on {
+                left = self.filter.process(0, left);
+                right = if self.stereo {
+                    self.filter.process(1, right)
+                } else {
+                    left
+                };
+            }
             emit(
                 frame,
                 left * gain * self.gain_left,

@@ -215,6 +215,48 @@ pub(crate) struct Zone {
     pub(crate) polyphony_scope: PolyphonyScope,
     pub(crate) bend_up: f64,
     pub(crate) bend_down: f64,
+    /// Gain by velocity, from `amp_velcurve_N`; `None` uses `veltrack`.
+    pub(crate) velcurve: Option<Arc<[f32; 128]>>,
+    pub(crate) offset_random: u64,
+    pub(crate) note_polyphony: Option<u32>,
+    pub(crate) filter: crate::region::FilterSpec,
+    pub(crate) fileg: crate::region::EnvelopeSpec,
+    pub(crate) fileg_depth: f64,
+    pub(crate) pitcheg: crate::region::EnvelopeSpec,
+    pub(crate) pitcheg_depth: f64,
+    pub(crate) lfos: [crate::region::LfoSpec; crate::region::LFO_SLOTS],
+    /// Whether anything moves while the note plays (an LFO, a pitch or
+    /// filter envelope, or a filter at all), so that the player works it out.
+    pub(crate) modulated: bool,
+}
+
+/// `amp_velcurve_N` points → gain for every velocity: straight lines between
+/// the points, with velocity 0 at 0 and 127 at 1 unless written.
+fn velcurve(points: &[(u8, f64)]) -> Option<Arc<[f32; 128]>> {
+    if points.is_empty() {
+        return None;
+    }
+    let mut p: Vec<(u8, f64)> = points.to_vec();
+    if !p.iter().any(|x| x.0 == 0) {
+        p.push((0, 0.0));
+    }
+    if !p.iter().any(|x| x.0 == 127) {
+        p.push((127, 1.0));
+    }
+    p.sort_by_key(|x| x.0);
+    let mut table = [0.0f32; 128];
+    for w in p.windows(2) {
+        let ((a, ga), (b, gb)) = (w[0], w[1]);
+        for v in a..=b {
+            let t = if b > a {
+                f64::from(v - a) / f64::from(b - a)
+            } else {
+                0.0
+            };
+            table[usize::from(v)] = (ga + (gb - ga) * t) as f32;
+        }
+    }
+    Some(Arc::new(table))
 }
 
 /// The voices a region's `polyphony` limit counts.
@@ -987,6 +1029,21 @@ fn zone(region: &Region, sample: Option<(usize, &SampleData)>, generated: bool) 
         polyphony_scope,
         bend_up: region.bend_up,
         bend_down: region.bend_down,
+        velcurve: velcurve(&region.amp_velcurve),
+        offset_random: region.offset_random,
+        note_polyphony: region.note_polyphony,
+        filter: region.filter,
+        fileg: region.fileg,
+        fileg_depth: region.fileg_depth,
+        pitcheg: region.pitcheg,
+        pitcheg_depth: region.pitcheg_depth,
+        lfos: region.lfos,
+        modulated: region.filter.cutoff.is_some()
+            || region.pitcheg_depth != 0.0
+            || region.lfos.iter().any(|l| {
+                l.freq > 0.0
+                    && (l.pitch != 0.0 || l.volume != 0.0 || l.amplitude != 0.0 || l.pan != 0.0)
+            }),
     };
     let Some((index, data)) = sample else {
         return zone;

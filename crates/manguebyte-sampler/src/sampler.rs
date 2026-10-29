@@ -748,6 +748,31 @@ fn start_voice(
             oldest.player.fade_out(FAST_FADE_SECONDS, start.sample_rate);
         }
     }
+    // `note_polyphony`: voices of the same note in the same group beyond the
+    // limit fade, oldest first.
+    if let Some(limit) = zone.note_polyphony {
+        loop {
+            let same = |voice: &Voice| {
+                voice.player.active
+                    && !voice.player.dying
+                    && voice.slot == slot
+                    && voice.player.note == start.note
+                    && voice.player.group == zone.group
+                    && voice.player.serial != start.serial
+            };
+            if voices.iter().filter(|voice| same(voice)).count() < limit as usize {
+                break;
+            }
+            let Some(oldest) = voices
+                .iter_mut()
+                .filter(|voice| same(voice))
+                .min_by_key(|voice| voice.player.age)
+            else {
+                break;
+            };
+            oldest.player.fade_out(FAST_FADE_SECONDS, start.sample_rate);
+        }
+    }
     // The sampler's polyphony: the voice that will be missed least fades,
     // a voice of another note before a layer of this one.
     let alive = voices

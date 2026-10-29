@@ -74,6 +74,14 @@
 //! | `loop_mode`, `loop_start`, `loop_end`, `loop_crossfade` | `no_loop`, `one_shot`, `loop_continuous`, `loop_sustain`. Without them a WAV file's `smpl` loop is used, continuously. Loop points are read through the loop by the interpolator, so the join adds nothing; `loop_crossfade` fades the loop's last frames into those before its start, linearly in amplitude. A released `loop_sustain` leaves its loop at the first frame that reads the same with the loop as without it, so the release never clicks, even inside the crossfade. |
 //! | `ampeg_delay`, `ampeg_start`, `ampeg_attack`, `ampeg_hold`, `ampeg_decay`, `ampeg_sustain`, `ampeg_release`, `ampeg_vel2*` | The amplitude envelope: a straight-line attack, a decay straight in decibels, and a release that falls 90 dB in its time. |
 //! | `group`, `off_by`, `off_mode`, `off_time`, `polyphony` | Choke groups and voice limits. `polyphony` counts the voices of the region's `group` when a `group` opcode applies to it, and otherwise those of the regions under the header where it is written. |
+//! | `note_polyphony` | Most voices of one note number in the region's `group`; older strikes fade. |
+//! | `amp_velcurve_N` | Gain at velocity N (0 to 1), straight between the points written, with 0 at velocity 0 and 1 at 127 unless written; replaces the `amp_veltrack` curve. |
+//! | `offset_random` | Up to this many frames, drawn per note, added to `offset`. |
+//! | `fil_type`, `cutoff`, `resonance`, `fil_keytrack`, `fil_keycenter`, `fil_veltrack`, `fil_random` | A filter, only when `cutoff` is written: `lpf_1p`, `hpf_1p`, `lpf_2p` (default), `hpf_2p`, `bpf_2p`, `brf_2p`, `lpf_4p`, `hpf_4p`, `lpf_6p`, `hpf_6p` (the `_sv` names are read as the plain ones; other types fall back to `lpf_2p` with a warning). `resonance` is the boost at the cutoff in decibels. Topology-preserving state-variable stages, so the cutoff moves without clicks. |
+//! | `fileg_*`, `fileg_depth`, `pitcheg_*`, `pitcheg_depth` | Filter and pitch envelopes, with the stages of `ampeg_*`; depth in cents. |
+//! | `amplfo_*`, `pitchlfo_*`, `fillfo_*` (`freq`, `depth`, `delay`, `fade`) | SFZ 1 sine LFOs on gain (dB), pitch and cutoff (cents). |
+//! | `lfoN_freq`, `lfoN_wave`, `lfoN_delay`, `lfoN_fade`, `lfoN_phase`, `lfoN_pitch`, `lfoN_volume`, `lfoN_amplitude`, `lfoN_pan`, `lfoN_cutoff` | SFZ 2 LFOs 1 to 4, each moving any of these. Waves: 0 triangle, 1 sine, 2 pulse 75 %, 3 square, 4 pulse 25 %, 5 pulse 12.5 %, 6 saw up, 7 saw down. LFOs and envelopes are worked out every 16 samples of the note. |
+//! | `region_label`, `group_label` and other `*_label` | Names for people; accepted and ignored. |
 //!
 //! Every other opcode is kept in [`Region::unknown`] and reported as a
 //! [`Warning`]; values outside an opcode's range are clamped with a

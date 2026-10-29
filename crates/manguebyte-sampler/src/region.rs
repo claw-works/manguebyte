@@ -120,6 +120,120 @@ impl Default for EnvelopeSpec {
     }
 }
 
+impl EnvelopeSpec {
+    /// The defaults of a modulation envelope (`fileg_*`, `pitcheg_*`):
+    /// everything zero, sustain and release included.
+    pub const MODULATION: Self = Self {
+        delay: 0.0,
+        start: 0.0,
+        attack: 0.0,
+        hold: 0.0,
+        decay: 0.0,
+        sustain: 0.0,
+        release: 0.0,
+        vel2delay: 0.0,
+        vel2attack: 0.0,
+        vel2hold: 0.0,
+        vel2decay: 0.0,
+        vel2sustain: 0.0,
+        vel2release: 0.0,
+    };
+}
+
+/// The filter type (`fil_type`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[non_exhaustive]
+pub enum FilterKind {
+    /// One-pole lowpass, 6 dB per octave.
+    Lowpass1,
+    /// One-pole highpass.
+    Highpass1,
+    /// Two-pole lowpass, 12 dB per octave: the format's default.
+    #[default]
+    Lowpass2,
+    /// Two-pole highpass.
+    Highpass2,
+    /// Two-pole bandpass.
+    Bandpass2,
+    /// Two-pole band reject.
+    Bandreject2,
+    /// Four-pole lowpass, 24 dB per octave.
+    Lowpass4,
+    /// Four-pole highpass.
+    Highpass4,
+    /// Six-pole lowpass, 36 dB per octave.
+    Lowpass6,
+    /// Six-pole highpass.
+    Highpass6,
+}
+
+/// The filter of a region (`fil_type`, `cutoff`, `resonance`,
+/// `fil_keytrack`, `fil_keycenter`, `fil_veltrack`, `fil_random`). There
+/// is no filter unless `cutoff` is written.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FilterSpec {
+    /// `fil_type`.
+    pub kind: FilterKind,
+    /// Hertz; `None` means no filter.
+    pub cutoff: Option<f64>,
+    /// Decibels of resonance peak, 0 to 40.
+    pub resonance: f64,
+    /// Cents of cutoff per key away from `keycenter`.
+    pub keytrack: f64,
+    /// The key at which key tracking leaves the cutoff alone.
+    pub keycenter: u8,
+    /// Cents of cutoff at full velocity.
+    pub veltrack: f64,
+    /// Up to this many cents, drawn per note, added to the cutoff.
+    pub random: f64,
+}
+
+impl Default for FilterSpec {
+    fn default() -> Self {
+        Self {
+            kind: FilterKind::Lowpass2,
+            cutoff: None,
+            resonance: 0.0,
+            keytrack: 0.0,
+            keycenter: 60,
+            veltrack: 0.0,
+            random: 0.0,
+        }
+    }
+}
+
+/// A low-frequency oscillator and what it moves. The SFZ 1 LFOs
+/// (`amplfo_*`, `pitchlfo_*`, `fillfo_*`) are slots 0, 1 and 2, each moving
+/// one thing; the SFZ 2 ones (`lfo1_*` to `lfo4_*`) are slots 3 to 6 and
+/// may move several.
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct LfoSpec {
+    /// Hertz; at 0 the LFO does nothing.
+    pub freq: f64,
+    /// `lfoN_wave`: 0 triangle, 1 sine, 2 pulse 75 %, 3 square, 4 pulse
+    /// 25 %, 5 pulse 12.5 %, 6 saw up, 7 saw down. SFZ 1 LFOs are sines.
+    pub wave: u8,
+    /// Seconds before it starts.
+    pub delay: f64,
+    /// Seconds it takes to reach full depth after the delay.
+    pub fade: f64,
+    /// Starting phase, 0 to 1.
+    pub phase: f64,
+    /// Depth in cents of pitch.
+    pub pitch: f64,
+    /// Depth in decibels of gain.
+    pub volume: f64,
+    /// Depth in percent of gain.
+    pub amplitude: f64,
+    /// Depth of pan, -100 to 100.
+    pub pan: f64,
+    /// Depth in cents of filter cutoff.
+    pub cutoff: f64,
+}
+
+/// Slots of [`Region::lfos`].
+pub const LFO_SLOTS: usize = 7;
+
 /// One region of an instrument: a sample, the notes and velocities it
 /// answers, and how it is played. The fields are the opcodes of the same
 /// name, with the format's defaults.
@@ -215,6 +329,27 @@ pub struct Region {
     pub bend_up: f64,
     /// Cents of pitch at the bottom of the pitch wheel (usually negative).
     pub bend_down: f64,
+    /// Gain at given velocities (`amp_velcurve_N`), 0 to 1, between which
+    /// the curve is straight; when any is written it replaces the
+    /// `amp_veltrack` curve.
+    pub amp_velcurve: Vec<(u8, f64)>,
+    /// Up to this many frames, drawn per note, added to `offset`.
+    pub offset_random: u64,
+    /// Most voices of one note number the region plays at once
+    /// (`note_polyphony`); older ones fade.
+    pub note_polyphony: Option<u32>,
+    /// The filter (`fil_type`, `cutoff`, …).
+    pub filter: FilterSpec,
+    /// The filter envelope (`fileg_*`).
+    pub fileg: EnvelopeSpec,
+    /// Cents of cutoff at the envelope's peak (`fileg_depth`).
+    pub fileg_depth: f64,
+    /// The pitch envelope (`pitcheg_*`).
+    pub pitcheg: EnvelopeSpec,
+    /// Cents of pitch at the envelope's peak (`pitcheg_depth`).
+    pub pitcheg_depth: f64,
+    /// The LFOs: `amplfo`, `pitchlfo`, `fillfo`, then `lfo1` to `lfo4`.
+    pub lfos: [LfoSpec; LFO_SLOTS],
     /// Opcodes the sampler does not play, as written. Inherited ones share
     /// their text with every region that inherits them.
     pub unknown: Vec<Opcode>,
@@ -264,6 +399,15 @@ impl Region {
             polyphony: None,
             bend_up: 200.0,
             bend_down: -200.0,
+            amp_velcurve: Vec::new(),
+            offset_random: 0,
+            note_polyphony: None,
+            filter: FilterSpec::default(),
+            fileg: EnvelopeSpec::MODULATION,
+            fileg_depth: 0.0,
+            pitcheg: EnvelopeSpec::MODULATION,
+            pitcheg_depth: 0.0,
+            lfos: [LfoSpec::default(); LFO_SLOTS],
             unknown: Vec::new(),
             group_set: false,
             polyphony_header: 0,
@@ -405,6 +549,70 @@ impl Region {
             "polyphony" => self.polyphony = Some(value.number(1.0, 256.0)? as u32),
             "bend_up" | "bendup" => self.bend_up = value.number(-9_600.0, 9_600.0)?,
             "bend_down" | "benddown" => self.bend_down = value.number(-9_600.0, 9_600.0)?,
+            "offset_random" => self.offset_random = value.number(0.0, 4_294_967_296.0)? as u64,
+            "note_polyphony" => self.note_polyphony = Some(value.number(1.0, 256.0)? as u32),
+            "fil_type" | "filtype" => {
+                self.filter.kind = match &*opcode.value {
+                    "lpf_1p" => FilterKind::Lowpass1,
+                    "hpf_1p" => FilterKind::Highpass1,
+                    "lpf_2p" | "lpf_2p_sv" => FilterKind::Lowpass2,
+                    "hpf_2p" | "hpf_2p_sv" => FilterKind::Highpass2,
+                    "bpf_2p" | "bpf_2p_sv" | "bpf_1p" => FilterKind::Bandpass2,
+                    "brf_2p" | "brf_2p_sv" | "brf_1p" => FilterKind::Bandreject2,
+                    "lpf_4p" => FilterKind::Lowpass4,
+                    "hpf_4p" => FilterKind::Highpass4,
+                    "lpf_6p" => FilterKind::Lowpass6,
+                    "hpf_6p" => FilterKind::Highpass6,
+                    _ => {
+                        // Another type (peaking, comb, ladder variants…): the
+                        // nearest kept is the default lowpass.
+                        warnings.push(Warning {
+                            location: opcode.location.clone(),
+                            kind: WarningKind::UnknownOpcode {
+                                name: Arc::clone(&opcode.name),
+                                value: Arc::clone(&opcode.value),
+                            },
+                        });
+                        FilterKind::Lowpass2
+                    }
+                };
+            }
+            "cutoff" => self.filter.cutoff = Some(value.number(1.0, 100_000.0)?),
+            "resonance" => self.filter.resonance = value.number(0.0, 40.0)?,
+            "fil_keytrack" => self.filter.keytrack = value.number(0.0, 1_200.0)?,
+            "fil_keycenter" => self.filter.keycenter = value.key()?,
+            "fil_veltrack" => self.filter.veltrack = value.number(-9_600.0, 9_600.0)?,
+            "fil_random" => self.filter.random = value.number(0.0, 9_600.0)?,
+            "fileg_depth" => self.fileg_depth = value.number(-12_000.0, 12_000.0)?,
+            "pitcheg_depth" => self.pitcheg_depth = value.number(-12_000.0, 12_000.0)?,
+            name if name.starts_with("fileg_") || name.starts_with("pitcheg_") => {
+                let (eg, field) = if let Some(f) = name.strip_prefix("fileg_") {
+                    (&mut self.fileg, f)
+                } else {
+                    (&mut self.pitcheg, &name["pitcheg_".len()..])
+                };
+                if !set_envelope(eg, field, &mut value)? {
+                    unknown(opcode, warnings, &mut self.unknown);
+                }
+            }
+            name if name.starts_with("amp_velcurve_") => {
+                match name["amp_velcurve_".len()..].parse::<u8>() {
+                    Ok(v) if v <= 127 => {
+                        let gain = value.number(0.0, 1.0)?;
+                        self.amp_velcurve.retain(|p| p.0 != v);
+                        self.amp_velcurve.push((v, gain));
+                    }
+                    _ => unknown(opcode, warnings, &mut self.unknown),
+                }
+            }
+            name if lfo_opcode(name).is_some() => {
+                let (slot, field) = lfo_opcode(name).unwrap_or((0, ""));
+                if !set_lfo(&mut self.lfos[slot], slot, field, &mut value)? {
+                    unknown(opcode, warnings, &mut self.unknown);
+                }
+            }
+            // Names and labels for people and editors; nothing to play.
+            name if name.ends_with("_label") || name == "label" => {}
             _ => {
                 warnings.push(Warning {
                     location: opcode.location.clone(),
@@ -418,6 +626,85 @@ impl Region {
         }
         Ok(())
     }
+}
+
+fn unknown(opcode: &Opcode, warnings: &mut Vec<Warning>, kept: &mut Vec<Opcode>) {
+    warnings.push(Warning {
+        location: opcode.location.clone(),
+        kind: WarningKind::UnknownOpcode {
+            name: Arc::clone(&opcode.name),
+            value: Arc::clone(&opcode.value),
+        },
+    });
+    kept.push(opcode.clone());
+}
+
+/// One stage of an envelope written as `<prefix>_<field>`. `false` when the
+/// field is not one.
+fn set_envelope(
+    eg: &mut EnvelopeSpec,
+    field: &str,
+    value: &mut Value<'_>,
+) -> Result<bool, SfzError> {
+    match field {
+        "delay" => eg.delay = value.number(0.0, 100.0)?,
+        "start" => eg.start = value.number(0.0, 100.0)?,
+        "attack" => eg.attack = value.number(0.0, 100.0)?,
+        "hold" => eg.hold = value.number(0.0, 100.0)?,
+        "decay" => eg.decay = value.number(0.0, 100.0)?,
+        "sustain" => eg.sustain = value.number(0.0, 100.0)?,
+        "release" => eg.release = value.number(0.0, 100.0)?,
+        "vel2delay" => eg.vel2delay = value.number(-100.0, 100.0)?,
+        "vel2attack" => eg.vel2attack = value.number(-100.0, 100.0)?,
+        "vel2hold" => eg.vel2hold = value.number(-100.0, 100.0)?,
+        "vel2decay" => eg.vel2decay = value.number(-100.0, 100.0)?,
+        "vel2sustain" => eg.vel2sustain = value.number(-100.0, 100.0)?,
+        "vel2release" => eg.vel2release = value.number(-100.0, 100.0)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
+}
+
+/// `amplfo_x` → (0, x), `pitchlfo_x` → (1, x), `fillfo_x` → (2, x),
+/// `lfoN_x` → (2 + N, x) for N in 1..=4.
+fn lfo_opcode(name: &str) -> Option<(usize, &str)> {
+    for (prefix, slot) in [("amplfo_", 0), ("pitchlfo_", 1), ("fillfo_", 2)] {
+        if let Some(f) = name.strip_prefix(prefix) {
+            return Some((slot, f));
+        }
+    }
+    let rest = name.strip_prefix("lfo")?;
+    let digits = rest.bytes().take_while(u8::is_ascii_digit).count();
+    let n: usize = rest[..digits].parse().ok()?;
+    let field = rest[digits..].strip_prefix('_')?;
+    (1..=4).contains(&n).then_some((2 + n, field))
+}
+
+/// One field of an LFO. `false` when the field is not one this sampler plays
+/// (such as one driven by a controller).
+fn set_lfo(
+    lfo: &mut LfoSpec,
+    slot: usize,
+    field: &str,
+    value: &mut Value<'_>,
+) -> Result<bool, SfzError> {
+    match (slot, field) {
+        (_, "freq") => lfo.freq = value.number(0.0, 100.0)?,
+        (_, "delay") => lfo.delay = value.number(0.0, 100.0)?,
+        (_, "fade") => lfo.fade = value.number(0.0, 100.0)?,
+        (0, "depth") => lfo.volume = value.number(-10.0, 10.0)?,
+        (1, "depth") => lfo.pitch = value.number(-1_200.0, 1_200.0)?,
+        (2, "depth") => lfo.cutoff = value.number(-1_200.0, 1_200.0)?,
+        (3.., "wave") => lfo.wave = value.number(0.0, 7.0)? as u8,
+        (3.., "phase") => lfo.phase = value.number(0.0, 1.0)?,
+        (3.., "pitch") => lfo.pitch = value.number(-9_600.0, 9_600.0)?,
+        (3.., "volume") => lfo.volume = value.number(-144.0, 48.0)?,
+        (3.., "amplitude") => lfo.amplitude = value.number(-100.0, 100.0)?,
+        (3.., "pan") => lfo.pan = value.number(-100.0, 100.0)?,
+        (3.., "cutoff" | "cutoff1") => lfo.cutoff = value.number(-9_600.0, 9_600.0)?,
+        _ => return Ok(false),
+    }
+    Ok(true)
 }
 
 /// An opcode's value being read, with somewhere to put a warning.
